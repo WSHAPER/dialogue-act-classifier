@@ -12,7 +12,7 @@ from pathlib import Path
 
 from datasets import Dataset
 
-LABEL_MAP = {"statement": 0, "question": 1, "instruction": 2}
+LABEL_MAP = {"commissive": 0, "directive": 1, "inform": 2, "question": 3}
 
 FILLERS = ["uh", "um", "like", "so", "well", "ok", "right", "you know"]
 

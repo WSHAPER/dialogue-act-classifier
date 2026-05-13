@@ -2,7 +2,9 @@
 
 ## Task
 
-Find a model that classifies utterances from meeting transcripts into **3 classes**: statement, question, instruction. Must work well on **conversational ASR output** (Whisper transcription), be loadable in **Rust** (via `candle` or `ort`), and ideally support multiple languages.
+Find a model that classifies utterances from meeting transcripts into **4 dialogue act classes**: commissive, directive, inform, question. Must work well on **conversational ASR output** (Whisper transcription), be loadable in **Rust** (via `candle` or `ort`), and ideally support multiple languages.
+
+The 4-class output maps to phonolitui's 3-class `SentenceType` at inference time: commissive→Statement, directive→Instruction, inform→Statement, question→Question.
 
 ## Evaluated Models
 
@@ -150,11 +152,11 @@ DistilBERT is:
 
 - **Conversational nature**: 13,118 multi-turn dialogues about daily life (travel, shopping, work, relationships) — much closer to meeting speech than TigreGotico's synthetic/written data
 - **100K+ utterances** with official train/val/test splits
-- **4 dialogue act classes** that map cleanly to our 3-class system:
-  - `inform` (1) → Statement
-  - `question` (2) → Question  
-  - `directive` (3) → Instruction
-  - `commissive` (4) → Statement
+- **4 dialogue act classes** used natively (no remapping):
+  - `commissive` (0) → commissive
+  - `directive` (1) → directive
+  - `inform` (2) → inform
+  - `question` (3) → question
 - **Available on HuggingFace**: `eusip/silicone` dataset, config `dyda_da`
 - **CC BY-NC-SA 4.0** license
 
@@ -166,18 +168,18 @@ Add ASR-specific edge cases to the training data:
 [
   {"text": "Can you hear me?", "label": "question"},
   {"text": "Can you see my screen?", "label": "question"},
-  {"text": "Do something for me.", "label": "instruction"},
-  {"text": "Please send the report.", "label": "instruction"},
-  {"text": "Close the door.", "label": "instruction"},
+  {"text": "Do something for me.", "label": "directive"},
+  {"text": "Please send the report.", "label": "directive"},
+  {"text": "Close the door.", "label": "directive"},
   {"text": "Hey man, how's it going?", "label": "question"},
   {"text": "How are you doing?", "label": "question"},
-  {"text": "I think this is the right approach.", "label": "statement"},
-  {"text": "That's definitely not a question.", "label": "statement"},
+  {"text": "I think this is the right approach.", "label": "inform"},
+  {"text": "That's definitely not a question.", "label": "inform"},
   {"text": "uh what is the timeline", "label": "question"},
   {"text": "um can you explain that again", "label": "question"},
-  {"text": "provide an example of how markdown works", "label": "instruction"},
-  {"text": "show me the results", "label": "instruction"},
-  {"text": "make sure it works", "label": "instruction"}
+  {"text": "provide an example of how markdown works", "label": "directive"},
+  {"text": "show me the results", "label": "directive"},
+  {"text": "make sure it works", "label": "directive"}
 ]
 ```
 
@@ -196,7 +198,7 @@ The fine-tuned model uses the **exact same** loading pattern as `NeuralClassifie
 // phonolitui: crates/core/src/classify/neural_classifier.rs
 // Just change:
 //   - BertConfig → DistilBertConfig
-//   - 2-class linear head → 3-class linear head
+//   - 2-class linear head → 4-class linear head
 //   - Model weights from fine-tuned DistilBERT
 
 let config = DistilBertConfig {
@@ -208,8 +210,8 @@ let config = DistilBertConfig {
     // ...
 };
 let bert = BertModel::load(vb.pp("distilbert"), &config)?;
-let classifier = candle_nn::linear(768, 3, vb.pp("classifier"))?;
-// Output: [statement_prob, question_prob, instruction_prob]
+let classifier = candle_nn::linear(768, 4, vb.pp("classifier"))?;
+// Output: [commissive_prob, directive_prob, inform_prob, question_prob]
 ```
 
 candle-transformers treats DistilBERT as a thin wrapper around BERT — the loading code is nearly identical.

@@ -1,14 +1,21 @@
 # phonolitui-sentence-classifier
 
-Fine-tuned DistilBERT model for **3-class sentence type classification** (statement / question / instruction), optimized for **conversational ASR transcripts** — the classification backend for [phonolitui](https://github.com/wilmergaz88/phonolitui).
+Fine-tuned DistilBERT model for **4-class dialogue act classification** (commissive / directive / inform / question), optimized for **conversational ASR transcripts** — the classification backend for [phonolitui](https://github.com/wilmergaz88/phonolitui).
 
 ## Why this exists
 
-phonolitui is a privacy-first, terminal-native AI meeting assistant. It transcribes meetings locally via Whisper and needs to classify each utterance as a **statement**, **question**, or **instruction** to power features like:
+phonolitui is a privacy-first, terminal-native AI meeting assistant. It transcribes meetings locally via Whisper and classifies each utterance into one of **4 dialogue act classes** to power features like:
 - Auto-highlighting questions in the transcript
 - Routing questions to LLM Q&A
-- Extracting action items (instructions) from the meeting
+- Extracting action items (directives) from the meeting
+- Tracking commitments/promises (commissives)
 - TUI footer labels showing sentence type per chunk
+
+The 4-class output is mapped to phonolitui's 3-class `SentenceType` at inference time:
+- `commissive` → Statement
+- `directive` → Instruction
+- `inform` → Statement
+- `question` → Question
 
 ### The problem with off-the-shelf models
 
@@ -22,18 +29,18 @@ We evaluated 5+ models before deciding to fine-tune:
 | ESM-based SILICONE models | Protein sequence models | Not text models, unsuitable. |
 | Various dialogue act papers | Research code only | No published weights on HuggingFace. |
 
-**No pre-trained model exists** that does 3-class sentence type classification well on conversational/ASR data with publicly available weights.
+**No pre-trained model exists** that does 4-class dialogue act classification well on conversational/ASR data with publicly available weights.
 
 ## Approach
 
-Fine-tune **DistilBERT** (`distilbert-base-uncased`, 67M params) on dialogue act data, mapping DA labels to our 3 classes:
+Fine-tune **DistilBERT** (`distilbert-base-uncased`, 67M params) on DailyDialog dialogue acts using the dataset's native 4-class labels:
 
-| Dialogue Act | DailyDialog Label | Our Class |
-|-------------|-------------------|-----------|
-| Inform | `inform` (1) | `statement` |
-| Question | `question` (2) | `question` |
-| Directive/Command | `directive` (3) | `instruction` |
-| Commissive/Promise | `commissive` (4) | `statement` |
+| Class | Label | Index | Description |
+|-------|-------|-------|-------------|
+| Commissive | `commissive` | 0 | Promises, commitments ("I'll handle it.") |
+| Directive | `directive` | 1 | Commands, requests ("Send the report.") |
+| Inform | `inform` | 2 | Statements, facts ("The deadline is Friday.") |
+| Question | `question` | 3 | Questions, inquiries ("What is the timeline?") |
 
 ### Why DistilBERT
 
@@ -46,7 +53,7 @@ Fine-tune **DistilBERT** (`distilbert-base-uncased`, 67M params) on dialogue act
 
 - **Conversational**: 13,118 multi-turn dialogues about daily life — much closer to meeting speech than TigreGotico's synthetic data
 - **100K+ utterances** with train/val/test splits
-- **4 dialogue act classes** that map cleanly to our 3-class system
+- **4 dialogue act classes** used directly — no remapping, preserving the full label granularity
 - **HuggingFace dataset**: `eusip/silicone` config `dyda_da`
 
 ## Training Plan
@@ -54,15 +61,16 @@ Fine-tune **DistilBERT** (`distilbert-base-uncased`, 67M params) on dialogue act
 ### Phase 1: English model
 
 1. Load `distilbert-base-uncased` + `eusip/silicone` (dyda_da)
-2. Map 4 DA labels → 3 classes (statement=0, question=1, instruction=2)
+2. Use native 4-class labels (commissive=0, directive=1, inform=2, question=3)
 3. Fine-tune with `transformers.Trainer` (15-30 min on single GPU)
 4. Augment training data with ASR edge cases:
    - "Can you hear me?" → question
-   - "Do something for me." → instruction
+   - "Do something for me." → directive
    - "Hey man, how's it going?" → question
-   - "Please send the report." → instruction
-   - "Close the door." → instruction
-   - "I think this is the right approach." → statement
+   - "Please send the report." → directive
+   - "Close the door." → directive
+   - "I think this is the right approach." → inform
+   - "I'll handle the deployment." → commissive
    - ASR artifacts: "uh what is the timeline" → question
 5. Evaluate on held-out test set + custom ASR edge-case test suite
 6. Export: `pytorch_model.bin` + `tokenizer.json` + `config.json`
@@ -83,8 +91,8 @@ The fine-tuned model loads in phonolitui via the **existing** `NeuralClassifier`
 // crates/core/src/classify/neural_classifier.rs — already works, just swap model files
 let config = BertConfig { /* distilbert config */ };
 let bert = BertModel::load(vb.pp("distilbert"), &config)?;
-let classifier = candle_nn::linear(config.hidden_size, 3, vb.pp("classifier"))?;
-// 3-class softmax: [statement_prob, question_prob, instruction_prob]
+let classifier = candle_nn::linear(config.hidden_size, 4, vb.pp("classifier"))?;
+// 4-class softmax: [commissive_prob, directive_prob, inform_prob, question_prob]
 ```
 
 No new dependencies needed. The `candle-core`, `candle-nn`, `candle-transformers`, and `tokenizers` crates are already in `Cargo.toml`.

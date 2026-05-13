@@ -12,11 +12,7 @@ pip install torch transformers datasets accelerate optimum[onnxruntime] scikit-l
 
 - **Primary**: `eusip/silicone` config `dyda_da` (DailyDialog dialogue acts)
 - **Augmentation**: Custom ASR edge cases (see `tests/test_cases.json`)
-- **Label mapping**: {0: statement, 1: question, 2: instruction}
-  - DailyDialog `inform` (1) → 0 (statement)
-  - DailyDialog `question` (2) → 1 (question)
-  - DailyDialog `directive` (3) → 2 (instruction)
-  - DailyDialog `commissive` (4) → 0 (statement)
+- **Labels** (native, no remapping): {0: commissive, 1: directive, 2: inform, 3: question}
 
 ### Hyperparameters
 
@@ -48,7 +44,7 @@ seed: 42
 - F1 > 0.90 on DailyDialog test set
 - > 0.85 accuracy on custom ASR edge-case test suite
 - "Can you hear me?" → question
-- "Do something for me." → instruction
+- "Do something for me." → directive
 - "Hey man, how's it going?" → question
 
 ## Phase 2: Multilingual

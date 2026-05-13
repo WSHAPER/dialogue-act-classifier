@@ -86,8 +86,11 @@ def export_pytorch(model_path: str, output_dir: str, use_safetensors: bool = Fal
     if "hidden_dim" in original_config:
         candle_cfg["hidden_dim"] = original_config["hidden_dim"]
 
-    id2label = original_config.get("id2label", {"0": "statement", "1": "question", "2": "instruction"})
-    label2id = original_config.get("label2id", {"statement": 0, "question": 1, "instruction": 2})
+    if "num_labels" not in original_config:
+        candle_cfg["num_labels"] = 4
+
+    id2label = original_config.get("id2label", {"0": "commissive", "1": "directive", "2": "inform", "3": "question"})
+    label2id = original_config.get("label2id", {"commissive": 0, "directive": 1, "inform": 2, "question": 3})
 
     candle_cfg["id2label"] = id2label
     candle_cfg["label2id"] = label2id
@@ -111,7 +114,7 @@ def export_pytorch(model_path: str, output_dir: str, use_safetensors: bool = Fal
         "num_labels": len(id2label),
         "framework": "candle-transformers",
         "input": "tokenized text (BERT tokenizer, max_length=128)",
-        "output": "softmax probabilities [statement, question, instruction]",
+        "output": "softmax probabilities [commissive, directive, inform, question]",
     }
     with open(out / "model_meta.json", "w") as f:
         json.dump(meta, f, indent=2)

@@ -1,6 +1,6 @@
 """
-Fine-tune DistilBERT on DailyDialog dialogue acts for 3-class sentence
-type classification: statement / question / instruction.
+Fine-tune DistilBERT on DailyDialog dialogue acts for 4-class
+classification: commissive / directive / inform / question.
 
 Usage:
     python train.py                          # defaults from config.yaml
@@ -34,22 +34,20 @@ def load_config(path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-def remap_dyda(example: dict, label_map: dict) -> dict:
-    example["label"] = label_map[example["Label"]]
+def prepare_dyda(example: dict) -> dict:
     example["text"] = example["Utterance"]
+    example["label"] = example["Label"]
     return example
 
 
 def load_dailydialog(cfg: dict) -> dict:
     ds = load_dataset(cfg["dataset"]["name"], cfg["dataset"]["config"], trust_remote_code=True)
-    dyda_map = {int(k): v for k, v in cfg["dataset"]["dailydialog_map"].items()}
 
     splits = {}
     for split_name in ("train", "validation", "test"):
         if split_name in ds:
             mapped = ds[split_name].map(
-                remap_dyda,
-                fn_kwargs={"label_map": dyda_map},
+                prepare_dyda,
                 remove_columns=ds[split_name].column_names,
             )
             mapped = mapped.remove_columns(
@@ -132,8 +130,8 @@ def main():
     model_config = AutoConfig.from_pretrained(
         base_model,
         num_labels=num_labels,
-        id2label={i: name for i, name in cfg["label_map"].items()},
-        label2id=cfg["label_map"],
+        id2label={str(i): name for i, name in cfg["label_map"].items()},
+        label2id={name: i for i, name in cfg["label_map"].items()},
     )
     model = AutoModelForSequenceClassification.from_pretrained(
         base_model, config=model_config

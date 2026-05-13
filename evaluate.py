@@ -29,7 +29,7 @@ from sklearn.metrics import (
     f1_score,
 )
 
-LABEL_NAMES = ["statement", "question", "instruction"]
+LABEL_NAMES = ["commissive", "directive", "inform", "question"]
 
 
 def load_model_and_tokenizer(model_path: str):
@@ -111,7 +111,7 @@ def evaluate_edge_cases(model, tokenizer, device, test_cases_path: str = "tests/
     with open(test_cases_path) as f:
         test_cases = json.load(f)
 
-    label_map = {"statement": 0, "question": 1, "instruction": 2}
+    label_map = {"commissive": 0, "directive": 1, "inform": 2, "question": 3}
     texts = [tc["text"] for tc in test_cases]
     expected = [label_map[tc["expected"]] for tc in test_cases]
     categories = [tc["category"] for tc in test_cases]
@@ -178,10 +178,10 @@ def evaluate_tigreGotico_baseline(test_cases_path: str = "tests/test_cases.json"
     session = ort.InferenceSession(str(model_path))
 
     tigre_map = {
-        "command": "instruction",
-        "request": "instruction",
-        "statement": "statement",
-        "exclamation": "statement",
+        "command": "directive",
+        "request": "directive",
+        "statement": "inform",
+        "exclamation": "inform",
         "polar_question": "question",
         "wh_question": "question",
     }
@@ -189,7 +189,7 @@ def evaluate_tigreGotico_baseline(test_cases_path: str = "tests/test_cases.json"
     with open(test_cases_path) as f:
         test_cases = json.load(f)
 
-    label_map = {"statement": 0, "question": 1, "instruction": 2}
+    label_map = {"commissive": 0, "directive": 1, "inform": 2, "question": 3}
     texts = [tc["text"] for tc in test_cases]
     expected = [label_map[tc["expected"]] for tc in test_cases]
 
@@ -213,7 +213,7 @@ def evaluate_tigreGotico_baseline(test_cases_path: str = "tests/test_cases.json"
 
         best_idx = int(np.argmax(probs))
         tigre_class = class_labels[best_idx]
-        mapped = tigre_map.get(tigre_class, "statement")
+        mapped = tigre_map.get(tigre_class, "inform")
         preds.append(label_map[mapped])
 
     correct = sum(1 for e, p in zip(expected, preds) if e == p)
