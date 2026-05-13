@@ -34,22 +34,22 @@ def load_config(path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-def remap_dailydialog(example: dict, label_map: dict) -> dict:
+def remap_dyda(example: dict, label_map: dict) -> dict:
     example["label"] = label_map[example["Label"]]
     example["text"] = example["Utterance"]
     return example
 
 
 def load_dailydialog(cfg: dict) -> dict:
-    ds = load_dataset(cfg["dataset"]["name"], cfg["dataset"]["config"])
-    dd_map = {int(k): v for k, v in cfg["dataset"]["dailydialog_map"].items()}
+    ds = load_dataset(cfg["dataset"]["name"], cfg["dataset"]["config"], trust_remote_code=True)
+    dyda_map = {int(k): v for k, v in cfg["dataset"]["dailydialog_map"].items()}
 
     splits = {}
     for split_name in ("train", "validation", "test"):
         if split_name in ds:
             mapped = ds[split_name].map(
-                remap_dailydialog,
-                fn_kwargs={"label_map": dd_map},
+                remap_dyda,
+                fn_kwargs={"label_map": dyda_map},
                 remove_columns=ds[split_name].column_names,
             )
             mapped = mapped.remove_columns(
@@ -112,6 +112,8 @@ def main():
     random.seed(seed)
     np.random.seed(seed)
 
+    import torch
+
     base_model = cfg["base_model"]
     num_labels = len(cfg["label_map"])
     max_length = cfg["max_seq_length"]
@@ -119,10 +121,12 @@ def main():
     batch_size = args.batch_size or cfg["batch_size"]
     lr = args.lr or cfg["learning_rate"]
     output_dir = args.output_dir or cfg["output_dir"]
+    use_cuda = torch.cuda.is_available()
 
     print(f"Base model: {base_model}")
     print(f"Labels: {cfg['label_map']}")
     print(f"Epochs: {epochs}, Batch: {batch_size}, LR: {lr}")
+    print(f"Device: {'CUDA' if use_cuda else 'CPU'}")
 
     tokenizer = AutoTokenizer.from_pretrained(base_model)
     model_config = AutoConfig.from_pretrained(
@@ -168,7 +172,7 @@ def main():
         learning_rate=lr,
         warmup_ratio=cfg["warmup_ratio"],
         weight_decay=cfg["weight_decay"],
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
         metric_for_best_model="f1_macro",
@@ -176,8 +180,8 @@ def main():
         logging_dir=str(run_dir / "logs"),
         logging_steps=50,
         seed=seed,
-        fp16=True,
-        dataloader_num_workers=4,
+        fp16=use_cuda,
+        dataloader_num_workers=0,
         report_to="none",
         push_to_hub=bool(args.push_to_hub),
         hub_model_id=args.push_to_hub,
