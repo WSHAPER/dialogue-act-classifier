@@ -82,11 +82,10 @@ def evaluate_dailydialog(model, tokenizer, device):
     print("Evaluating on DailyDialog test set")
     print("=" * 60)
 
-    ds = load_dataset("eusip/silicone", "dyda_da", split="test")
+    ds = load_dataset("eusip/silicone", "dyda_da", split="test", trust_remote_code=True)
 
-    dd_map = {1: 0, 2: 1, 3: 2, 4: 0}
     texts = ds["Utterance"]
-    labels = [dd_map[l] for l in ds["Label"]]
+    labels = ds["Label"]
 
     preds, probs, total_time, avg_time = predict_batch(texts, model, tokenizer, device)
 
