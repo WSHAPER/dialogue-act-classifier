@@ -1,0 +1,48 @@
+[
+  {"text": "What is the timeline?", "expected": "question", "category": "wh_question"},
+  {"text": "How do you sort a linked list in Python?", "expected": "question", "category": "wh_question"},
+  {"text": "Where are we on the project?", "expected": "question", "category": "wh_question"},
+  {"text": "Who is handling the deployment?", "expected": "question", "category": "wh_question"},
+  {"text": "Why did we change the approach?", "expected": "question", "category": "wh_question"},
+  {"text": "When is the deadline?", "expected": "question", "category": "wh_question"},
+
+  {"text": "Can you hear me?", "expected": "question", "category": "polar_question"},
+  {"text": "Is this working?", "expected": "question", "category": "polar_question"},
+  {"text": "Are we on track?", "expected": "question", "category": "polar_question"},
+  {"text": "Do you know the answer?", "expected": "question", "category": "polar_question"},
+  {"text": "How are you doing?", "expected": "question", "category": "polar_question"},
+  {"text": "Hey man, how's it going?", "expected": "question", "category": "polar_question"},
+  {"text": "How's it going?", "expected": "question", "category": "polar_question"},
+  {"text": "Is there any update?", "expected": "question", "category": "polar_question"},
+  {"text": "Can you see my screen?", "expected": "question", "category": "polar_question"},
+
+  {"text": "Close the door.", "expected": "instruction", "category": "command"},
+  {"text": "Send the report.", "expected": "instruction", "category": "command"},
+  {"text": "Open the file.", "expected": "instruction", "category": "command"},
+  {"text": "Stop the server.", "expected": "instruction", "category": "command"},
+  {"text": "Delete that file.", "expected": "instruction", "category": "command"},
+  {"text": "Show me the results.", "expected": "instruction", "category": "command"},
+  {"text": "Provide an example of how markdown works.", "expected": "instruction", "category": "command"},
+  {"text": "Tell me about the project status.", "expected": "instruction", "category": "command"},
+
+  {"text": "Please do something for me.", "expected": "instruction", "category": "request"},
+  {"text": "Do something for me.", "expected": "instruction", "category": "request"},
+  {"text": "Please send me the report.", "expected": "instruction", "category": "request"},
+  {"text": "Make sure it works.", "expected": "instruction", "category": "request"},
+  {"text": "Ensure that the tests pass.", "expected": "instruction", "category": "request"},
+  {"text": "Let me know when you're done.", "expected": "instruction", "category": "request"},
+
+  {"text": "The weather is nice today.", "expected": "statement", "category": "statement"},
+  {"text": "I think this is the right approach.", "expected": "statement", "category": "statement"},
+  {"text": "The deadline is next Friday.", "expected": "statement", "category": "statement"},
+  {"text": "That's definitely not a question.", "expected": "statement", "category": "statement"},
+  {"text": "The meeting went well.", "expected": "statement", "category": "statement"},
+  {"text": "We decided to go with option A.", "expected": "statement", "category": "statement"},
+  {"text": "I'll handle the deployment.", "expected": "statement", "category": "statement"},
+
+  {"text": "uh what is the timeline", "expected": "question", "category": "asr_disfluent"},
+  {"text": "um can you explain that again", "expected": "question", "category": "asr_disfluent"},
+  {"text": "so how do we handle this", "expected": "question", "category": "asr_disfluent"},
+  {"text": "ok let's move forward with the plan", "expected": "instruction", "category": "asr_disfluent"},
+  {"text": "well the meeting went well", "expected": "statement", "category": "asr_disfluent"}
+]
