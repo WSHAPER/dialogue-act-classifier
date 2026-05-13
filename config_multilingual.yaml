@@ -1,0 +1,40 @@
+base_model: distilbert-base-multilingual-cased
+max_seq_length: 128
+batch_size: 32
+learning_rate: 2.0e-5
+num_epochs: 5
+warmup_ratio: 0.1
+weight_decay: 0.01
+seed: 42
+output_dir: models/multilingual
+label_map:
+  0: commissive
+  1: directive
+  2: inform
+  3: question
+xdailydialog:
+  repo: https://github.com/liuzeming01/XDailyDialog.git
+  local_path: .reference/XDailyDialog
+  languages:
+    - code: en
+      train: en_train_human.txt
+      dev: en_dev_human.txt
+      test: en_test_human.txt
+    - code: de
+      train: de_train_human.txt
+      dev: de_dev_human.txt
+      test: de_test_human.txt
+    - code: it
+      train: it_train_human.txt
+      dev: it_dev_human.txt
+      test: it_test_human.txt
+  act_label_map:
+    1: 0
+    2: 1
+    3: 2
+    4: 3
+russian:
+  source: translate
+  model: Helsinki-NLP/opus-mt-en-ru
+  size: full
+augmentation: tests/test_cases.json

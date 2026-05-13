@@ -1,0 +1,28 @@
+[
+  {"text": "What is the timeline?", "expected": "question", "language": "en"},
+  {"text": "Can you hear me?", "expected": "question", "language": "en"},
+  {"text": "Close the door.", "expected": "directive", "language": "en"},
+  {"text": "Please send the report.", "expected": "directive", "language": "en"},
+  {"text": "The meeting went well.", "expected": "inform", "language": "en"},
+  {"text": "I'll handle the deployment.", "expected": "commissive", "language": "en"},
+
+  {"text": "Wie ist der Zeitplan?", "expected": "question", "language": "de"},
+  {"text": "Kannst du mich hören?", "expected": "question", "language": "de"},
+  {"text": "Schließ die Tür.", "expected": "directive", "language": "de"},
+  {"text": "Bitte senden Sie den Bericht.", "expected": "directive", "language": "de"},
+  {"text": "Das Meeting war gut.", "expected": "inform", "language": "de"},
+  {"text": "Ich kümmere mich darum.", "expected": "commissive", "language": "de"},
+  {"text": "Wo befinden wir uns im Projekt?", "expected": "question", "language": "de"},
+  {"text": "Wie läuft das Projekt?", "expected": "question", "language": "de"},
+
+  {"text": "Каков график?", "expected": "question", "language": "ru"},
+  {"text": "Ты меня слышишь?", "expected": "question", "language": "ru"},
+  {"text": "Закрой дверь.", "expected": "directive", "language": "ru"},
+  {"text": "Пожалуйста, отправьте отчёт.", "expected": "directive", "language": "ru"},
+  {"text": "Встреча прошла хорошо.", "expected": "inform", "language": "ru"},
+  {"text": "Я займусь развёртыванием.", "expected": "commissive", "language": "ru"},
+  {"text": "Как идут дела с проектом?", "expected": "question", "language": "ru"},
+  {"text": "Покажите мне результаты.", "expected": "directive", "language": "ru"},
+  {"text": "Мы решили выбрать вариант А.", "expected": "inform", "language": "ru"},
+  {"text": "Я обещаю закончить к пятнице.", "expected": "commissive", "language": "ru"}
+]
