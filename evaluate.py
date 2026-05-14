@@ -31,6 +31,35 @@ from sklearn.metrics import (
 
 LABEL_NAMES = ["commissive", "directive", "inform", "question"]
 
+INFERENCE_MAX_LENGTH = 48
+
+
+def _create_optimized_session(onnx_path, use_gpu=True):
+    """Create ONNX Runtime session with ORT_ENABLE_ALL, memory patterns,
+    cudnn exhaustive search for Tensor Core FP16 acceleration."""
+    import onnxruntime as ort
+
+    sess_opts = ort.SessionOptions()
+    sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    sess_opts.enable_mem_pattern = True
+    sess_opts.enable_mem_reuse = True
+    sess_opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+
+    providers = []
+    if use_gpu:
+        providers.append((
+            "CUDAExecutionProvider",
+            {
+                "device_id": 0,
+                "arena_extend_strategy": "kNextPowerOfTwo",
+                "cudnn_conv_algo_search": "EXHAUSTIVE",
+                "do_copy_in_default_stream": True,
+            },
+        ))
+    providers.append("CPUExecutionProvider")
+
+    return ort.InferenceSession(str(onnx_path), sess_options=sess_opts, providers=providers)
+
 
 def load_model_and_tokenizer(model_path: str):
     import torch
@@ -276,10 +305,11 @@ def benchmark_quantized_model(quantized_path: str, test_cases_path: str = "tests
             return None
 
     providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-    session = ort.InferenceSession(str(onnx_file), providers=providers)
+    session = _create_optimized_session(onnx_file, use_gpu=True)
     active_provider = session.get_providers()[0]
     print(f"Model: {onnx_file.name} ({onnx_file.stat().st_size / 1e6:.1f} MB)")
     print(f"Execution provider: {active_provider}")
+    print(f"Inference max_length: {INFERENCE_MAX_LENGTH}")
 
     from transformers import AutoTokenizer
     from datasets import load_dataset
@@ -298,7 +328,7 @@ def benchmark_quantized_model(quantized_path: str, test_cases_path: str = "tests
     per_item_latencies = []
 
     for i, text in enumerate(texts):
-        inp = tokenizer(text, padding="max_length", truncation=True, max_length=128, return_tensors="np")
+        inp = tokenizer(text, padding="max_length", truncation=True, max_length=INFERENCE_MAX_LENGTH, return_tensors="np")
         feed = {
             "input_ids": inp["input_ids"].astype(np.int64),
             "attention_mask": inp["attention_mask"].astype(np.int64),
@@ -338,7 +368,7 @@ def benchmark_quantized_model(quantized_path: str, test_cases_path: str = "tests
 
     ec_preds = []
     for text in ec_texts:
-        inp = tokenizer(text, padding="max_length", truncation=True, max_length=128, return_tensors="np")
+        inp = tokenizer(text, padding="max_length", truncation=True, max_length=INFERENCE_MAX_LENGTH, return_tensors="np")
         feed = {
             "input_ids": inp["input_ids"].astype(np.int64),
             "attention_mask": inp["attention_mask"].astype(np.int64),

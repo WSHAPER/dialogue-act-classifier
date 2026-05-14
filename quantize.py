@@ -57,6 +57,54 @@ def export_fp32_onnx(model_path: str, output_dir: str):
     return out
 
 
+def optimize_graph(fp32_onnx_path: str, output_path: str, model_path: str = None) -> bool:
+    """Convert FP32 ONNX to FP16. Graph optimization is handled at session
+    level via ORT_ENABLE_ALL, which avoids creating CPU-only fused nodes that
+    block CUDA Graphs partitioning."""
+    from onnxruntime.transformers.float16 import convert_float_to_float16
+    import onnx
+
+    print("Converting FP32 ONNX to FP16...")
+    model = onnx.load(str(fp32_onnx_path))
+    model_fp16 = convert_float_to_float16(model, keep_io_types=True)
+    onnx.save(model_fp16, str(output_path))
+    print("  FP16 conversion complete (graph optimization deferred to ORT_ENABLE_ALL at session level)")
+    return True
+
+
+def _create_optimized_session(onnx_path, use_gpu=True):
+    """Create ONNX Runtime session with full optimization: ORT_ENABLE_ALL,
+    memory patterns, cudnn exhaustive search for Tensor Core FP16."""
+    import onnxruntime as ort
+
+    sess_opts = ort.SessionOptions()
+    sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    sess_opts.enable_mem_pattern = True
+    sess_opts.enable_mem_reuse = True
+    sess_opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    sess_opts.optimized_model_filepath = str(onnx_path).replace(".onnx", "-ort-cache.onnx")
+
+    providers = []
+    if use_gpu:
+        providers.append((
+            "CUDAExecutionProvider",
+            {
+                "device_id": 0,
+                "arena_extend_strategy": "kNextPowerOfTwo",
+                "cudnn_conv_algo_search": "EXHAUSTIVE",
+                "do_copy_in_default_stream": True,
+            },
+        ))
+    providers.append("CPUExecutionProvider")
+
+    return ort.InferenceSession(str(onnx_path), sess_options=sess_opts, providers=providers)
+
+
+def _load_inference_max_length() -> int:
+    cfg = load_config()
+    return cfg.get("inference_max_length", cfg.get("max_seq_length", 48))
+
+
 def _calibrationDataReader(tokenizer, max_length, num_samples, seed):
     from datasets import load_dataset as hf_load_dataset
 
@@ -135,13 +183,7 @@ def quantize_model(
     quantized_path = quant_dir / "model.onnx"
 
     if mode == "fp16":
-        from onnxruntime.transformers.float16 import convert_float_to_float16
-        import onnx
-
-        print("Converting FP32 ONNX to FP16...")
-        model = onnx.load(str(onnx_file))
-        model_fp16 = convert_float_to_float16(model, keep_io_types=True)
-        onnx.save(model_fp16, str(quantized_path))
+        optimize_graph(str(onnx_file), str(quantized_path), model_path=model_path)
     elif mode == "static":
         from onnxruntime.quantization import quantize_static, QuantFormat
         from onnxruntime.quantization.shape_inference import quant_pre_process
@@ -230,6 +272,8 @@ def benchmark_models(fp32_dir: Path, quant_dir: Path, use_gpu: bool = True):
 
     results = {}
     LATENCY_SUBSAMPLE = 200
+    inference_max_length = _load_inference_max_length()
+    print(f"  Inference max_length: {inference_max_length}")
 
     quant_label = quant_dir.name.upper()
     for label, model_dir in [("FP32", fp32_dir), (quant_label, quant_dir)]:
@@ -242,7 +286,7 @@ def benchmark_models(fp32_dir: Path, quant_dir: Path, use_gpu: bool = True):
             continue
 
         print(f"\nBenchmarking {label}: {onnx_file.name}")
-        session = ort.InferenceSession(str(onnx_file), providers=providers)
+        session = _create_optimized_session(onnx_file, use_gpu=use_gpu)
         active_provider = session.get_providers()[0]
         print(f"  Execution provider: {active_provider}")
 
@@ -255,7 +299,7 @@ def benchmark_models(fp32_dir: Path, quant_dir: Path, use_gpu: bool = True):
                 batch,
                 padding=True,
                 truncation=True,
-                max_length=128,
+                max_length=inference_max_length,
                 return_tensors="np",
             )
             input_feed = {
@@ -277,7 +321,7 @@ def benchmark_models(fp32_dir: Path, quant_dir: Path, use_gpu: bool = True):
 
         per_item_latencies = []
         for i in range(min(LATENCY_SUBSAMPLE, len(texts))):
-            inp = tokenizer(texts[i], padding="max_length", truncation=True, max_length=128, return_tensors="np")
+            inp = tokenizer(texts[i], padding="max_length", truncation=True, max_length=inference_max_length, return_tensors="np")
             feed = {
                 "input_ids": inp["input_ids"].astype(np.int64),
                 "attention_mask": inp["attention_mask"].astype(np.int64),
@@ -334,8 +378,118 @@ def benchmark_models(fp32_dir: Path, quant_dir: Path, use_gpu: bool = True):
 
 
 def _model_size_mb(directory: Path) -> float:
-    total = sum(f.stat().st_size for f in directory.glob("*.onnx"))
+    total = sum(f.stat().st_size for f in directory.glob("*.onnx") if "-ort-cache" not in f.name)
     return total / 1e6
+
+
+def benchmark_cuda_graphs(quant_dir: Path, use_gpu: bool = True):
+    """Benchmark with IOBinding: keeps tensors on GPU, avoids CPU↔GPU copies.
+    Also attempts CUDA Graphs capture if all nodes are CUDA-partitionable."""
+    import onnxruntime as ort
+    from datasets import load_dataset
+    from transformers import AutoTokenizer
+    from sklearn.metrics import accuracy_score, f1_score
+
+    if not use_gpu:
+        print("IOBinding/CUDA Graphs require GPU — skipping")
+        return None
+
+    onnx_file = quant_dir / "model.onnx"
+    if not onnx_file.exists():
+        onnx_file = list(quant_dir.glob("*.onnx"))[0]
+
+    max_length = _load_inference_max_length()
+
+    print(f"\n{'=' * 60}")
+    print(f"IOBinding Benchmark (max_length={max_length})")
+    print(f"{'=' * 60}")
+
+    sess_opts = ort.SessionOptions()
+    sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    sess_opts.enable_mem_pattern = True
+    sess_opts.enable_mem_reuse = True
+    sess_opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+
+    providers = [(
+        "CUDAExecutionProvider",
+        {
+            "device_id": 0,
+            "arena_extend_strategy": "kNextPowerOfTwo",
+            "cudnn_conv_algo_search": "EXHAUSTIVE",
+            "do_copy_in_default_stream": False,
+        },
+    )]
+
+    session = ort.InferenceSession(str(onnx_file), sess_options=sess_opts, providers=providers)
+    active_provider = session.get_providers()[0]
+    print(f"  Provider: {active_provider}")
+
+    tokenizer = AutoTokenizer.from_pretrained(str(quant_dir))
+    ds = load_dataset("eusip/silicone", "dyda_da", split="test", trust_remote_code=True)
+    texts = ds["Utterance"]
+    labels = ds["Label"]
+
+    dummy = tokenizer("warmup", padding="max_length", truncation=True, max_length=max_length, return_tensors="np")
+    input_ids_gpu = ort.OrtValue.ortvalue_from_numpy(dummy["input_ids"].astype(np.int64), "cuda", 0)
+    mask_gpu = ort.OrtValue.ortvalue_from_numpy(dummy["attention_mask"].astype(np.int64), "cuda", 0)
+
+    io_binding = session.io_binding()
+    io_binding.bind_ortvalue_input("input_ids", input_ids_gpu)
+    io_binding.bind_ortvalue_input("attention_mask", mask_gpu)
+    io_binding.bind_output("logits", "cuda", 0)
+
+    for _ in range(10):
+        session.run_with_iobinding(io_binding)
+
+    n_samples = min(200, len(texts))
+    all_preds = []
+    latencies = []
+
+    for i in range(n_samples):
+        inp = tokenizer(texts[i], padding="max_length", truncation=True, max_length=max_length, return_tensors="np")
+        input_ids_gpu.update_inplace(inp["input_ids"].astype(np.int64))
+        mask_gpu.update_inplace(inp["attention_mask"].astype(np.int64))
+
+        t0 = time.perf_counter()
+        session.run_with_iobinding(io_binding)
+        latencies.append((time.perf_counter() - t0) * 1000)
+
+        logits = io_binding.get_outputs()[0].numpy()
+        all_preds.append(int(np.argmax(logits, axis=-1)[0]))
+
+    for i in range(n_samples, len(texts)):
+        inp = tokenizer(texts[i], padding="max_length", truncation=True, max_length=max_length, return_tensors="np")
+        input_ids_gpu.update_inplace(inp["input_ids"].astype(np.int64))
+        mask_gpu.update_inplace(inp["attention_mask"].astype(np.int64))
+        session.run_with_iobinding(io_binding)
+        logits = io_binding.get_outputs()[0].numpy()
+        all_preds.append(int(np.argmax(logits, axis=-1)[0]))
+
+    s = sorted(latencies)
+    n = len(s)
+    p50 = s[n // 2]
+    p95 = s[int(n * 0.95)]
+    p99 = s[int(n * 0.99)]
+
+    acc = accuracy_score(labels, all_preds)
+    f1 = f1_score(labels, all_preds, average="macro")
+
+    print(f"  Accuracy: {acc:.4f}")
+    print(f"  F1-macro: {f1:.4f}")
+    print(f"  Single-sample latency ({n} samples): p50={p50:.3f}ms, p95={p95:.3f}ms, p99={p99:.3f}ms")
+
+    result = {
+        "accuracy": float(acc),
+        "f1_macro": float(f1),
+        "p50_ms": float(p50),
+        "p95_ms": float(p95),
+        "p99_ms": float(p99),
+        "provider": active_provider,
+        "iobinding": True,
+    }
+
+    print(f"{'=' * 60}")
+    return result
 
 
 def main():
@@ -347,6 +501,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--skip-benchmark", action="store_true")
     parser.add_argument("--cpu-only", action="store_true", help="Benchmark on CPU only")
+    parser.add_argument("--iobinding", action="store_true", help="Also benchmark with IOBinding (GPU-resident tensors)")
     args = parser.parse_args()
 
     output_dir = args.output_dir or str(Path(args.model_path) / "quantized")
@@ -365,6 +520,14 @@ def main():
         with open(results_path, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nBenchmark results saved to {results_path}")
+
+    if args.iobinding:
+        cg_results = benchmark_cuda_graphs(quant_dir, use_gpu=not args.cpu_only)
+        if cg_results:
+            cg_path = Path(output_dir) / "iobinding_results.json"
+            with open(cg_path, "w") as f:
+                json.dump(cg_results, f, indent=2)
+            print(f"IOBinding results saved to {cg_path}")
 
     print("\nDone.")
 

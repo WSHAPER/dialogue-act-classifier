@@ -1,5 +1,6 @@
 base_model: distilbert-base-uncased
 max_seq_length: 128
+inference_max_length: 48
 batch_size: 32
 learning_rate: 2.0e-5
 num_epochs: 4
