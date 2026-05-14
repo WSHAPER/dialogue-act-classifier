@@ -73,4 +73,4 @@ models/
 └── it/  (...)
 ```
 
-phonolitui's cascade selects the right classifier based on `TranscriptChunk.language`.
+A downstream application's cascade selects the right classifier based on `TranscriptChunk.language`.

@@ -4,7 +4,7 @@
 
 Find a model that classifies utterances from meeting transcripts into **4 dialogue act classes**: commissive, directive, inform, question. Must work well on **conversational ASR output** (Whisper transcription), be loadable in **Rust** (via `candle` or `ort`), and ideally support multiple languages.
 
-The 4-class output maps to phonolitui's 3-class `SentenceType` at inference time: commissive→Statement, directive→Instruction, inform→Statement, question→Question.
+The 4-class output maps to application-specific categories at inference time: commissive→Statement, directive→Instruction, inform→Statement, question→Question.
 
 ## Evaluated Models
 
@@ -58,7 +58,7 @@ The 4-class output maps to phonolitui's 3-class `SentenceType` at inference time
 | Rust loading | `candle-transformers` + `tokenizers` (already working) |
 
 **Strengths:**
-- Already integrated in phonolitui
+- Already integrated in downstream project
 - Trained on ASR data
 - Pure Rust inference via candle (no CUDA conflict with Whisper)
 - Works for clear WH-questions and statements
@@ -146,7 +146,7 @@ DistilBERT is:
 - **Small enough** to run alongside Whisper without memory pressure
 - **Fast enough** for real-time classification in the transcription pipeline
 - **Compatible** with candle's DistilBERT implementation
-- **Well-understood** — the phonolitui BERT loading code (`neural_classifier.rs`) works with nearly identical DistilBERT loading
+- **Well-understood** — standard DistilBERT loading via candle-transformers
 
 ### Why DailyDialog
 
@@ -195,7 +195,7 @@ For EN + DE + ES + FR + IT + RU:
 The fine-tuned model uses the **exact same** loading pattern as `NeuralClassifier`:
 
 ```rust
-// phonolitui: crates/core/src/classify/neural_classifier.rs
+// Standard candle-transformers DistilBERT loading
 // Just change:
 //   - BertConfig → DistilBertConfig
 //   - 2-class linear head → 4-class linear head

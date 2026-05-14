@@ -165,7 +165,7 @@ def evaluate_tigreGotico_baseline(test_cases_path: str = "tests/test_cases.json"
     import glob
 
     model_candidates = list(Path.home().glob(
-        ".local/share/phonolitui/models/classify/sentence_type_EN*.onnx"
+        ".local/share/dialogue-act-classifier/models/classify/sentence_type_EN*.onnx"
     ))
     if not model_candidates:
         print("No TigreGotico ONNX model found, skipping baseline")

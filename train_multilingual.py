@@ -230,26 +230,22 @@ def main():
         print(f"  Failed: {e}")
 
     if not args.skip_ru and (args.languages is None or "ru" in args.languages):
-        print("\nGenerating Russian data via translation...")
+        print("\nLoading Russian (WSHAPER/xdailydialog-ru from HF)...")
         try:
-            ru_source = all_splits["train"][0] if all_splits["train"] else None
-            if ru_source:
-                en_records = [r for r in ru_source if r.get("language") == "en"]
-                if en_records:
-                    en_ds = Dataset.from_list(en_records)
-                    ru_ds = translate_to_russian(en_ds)
-                    all_splits["train"].append(ru_ds)
-                    print(f"  Russian train: {len(ru_ds)}")
-
-                    for split_name in ("validation", "test"):
-                        if all_splits[split_name]:
-                            en_val = [r for r in all_splits[split_name][0] if r.get("language") == "en"]
-                            if en_val:
-                                ru_val = translate_to_russian(Dataset.from_list(en_val), batch_size=32)
-                                all_splits[split_name].append(ru_val)
-                                print(f"  Russian {split_name}: {len(ru_val)}")
+            ru_ds = load_dataset("WSHAPER/xdailydialog-ru", trust_remote_code=True)
+            split_map = {"train": "train", "validation": "validation", "test": "test"}
+            for target_split, hf_split in split_map.items():
+                if hf_split in ru_ds:
+                    records = []
+                    for dialog in ru_ds[hf_split]:
+                        for utt, act in zip(dialog["utterances"], dialog["acts"]):
+                            records.append({"text": utt, "label": act, "language": "ru"})
+                    if records:
+                        ds_split = Dataset.from_list(records)
+                        all_splits[target_split].append(ds_split)
+                        print(f"  {target_split}: {len(records)} utterances")
         except Exception as e:
-            print(f"  Russian translation failed: {e}")
+            print(f"  Russian loading failed: {e}")
             print("  Continuing without Russian...")
 
     merged = {}

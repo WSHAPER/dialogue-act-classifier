@@ -5,7 +5,7 @@ Outputs:
   1. PyTorch weights + tokenizer + config → for candle-transformers loading
   2. ONNX model (optional) → for ort crate loading
 
-The candle export produces the exact files phonolitui's NeuralClassifier expects:
+The candle export produces the files needed for Rust inference via candle-transformers:
   - pytorch_model.bin (or model.safetensors)
   - tokenizer.json
   - config.json (DistilBertConfig compatible with candle)

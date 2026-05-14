@@ -1,21 +1,10 @@
-# phonolitui-sentence-classifier
+# dialogue-act-classifier
 
-Fine-tuned DistilBERT model for **4-class dialogue act classification** (commissive / directive / inform / question), optimized for **conversational ASR transcripts** — the classification backend for [phonolitui](https://github.com/wilmergaz88/phonolitui).
+Fine-tuned DistilBERT models for **4-class dialogue act classification** (commissive / directive / inform / question), optimized for **conversational ASR transcripts**.
 
 ## Why this exists
 
-phonolitui is a privacy-first, terminal-native AI meeting assistant. It transcribes meetings locally via Whisper and classifies each utterance into one of **4 dialogue act classes** to power features like:
-- Auto-highlighting questions in the transcript
-- Routing questions to LLM Q&A
-- Extracting action items (directives) from the meeting
-- Tracking commitments/promises (commissives)
-- TUI footer labels showing sentence type per chunk
-
-The 4-class output is mapped to phonolitui's 3-class `SentenceType` at inference time:
-- `commissive` → Statement
-- `directive` → Instruction
-- `inform` → Statement
-- `question` → Question
+No pre-trained model exists that does 4-class dialogue act classification well on conversational/ASR data with publicly available weights. This project fills that gap.
 
 ### The problem with off-the-shelf models
 
@@ -46,7 +35,7 @@ Fine-tune **DistilBERT** (`distilbert-base-uncased`, 67M params) on DailyDialog 
 
 - **Small**: 67M params, ~250MB — fits in memory alongside Whisper
 - **Fast**: ~5-15ms CPU inference via candle (pure Rust, no ONNX runtime needed)
-- **Compatible**: Loads directly with `candle-transformers` using the exact same pattern phonolitui already has for BERT classification
+- **Compatible**: Loads directly with `candle-transformers` for pure Rust inference
 - **No CUDA conflict**: Pure CPU inference via candle, no `ort`/ONNX Runtime competing with Whisper's GPU context
 
 ### Why DailyDialog
@@ -83,43 +72,37 @@ Fine-tune **DistilBERT** (`distilbert-base-uncased`, 67M params) on DailyDialog 
 3. Same label mapping, language-specific training
 4. Language-specific OR unified multilingual model (TBD based on accuracy)
 
-## Rust Integration
+## Rust Integration (candle-transformers)
 
-The fine-tuned model loads in phonolitui via the **existing** `NeuralClassifier` pattern:
+The fine-tuned model loads via `candle-transformers`:
 
 ```rust
-// crates/core/src/classify/neural_classifier.rs — already works, just swap model files
 let config = BertConfig { /* distilbert config */ };
 let bert = BertModel::load(vb.pp("distilbert"), &config)?;
 let classifier = candle_nn::linear(config.hidden_size, 4, vb.pp("classifier"))?;
 // 4-class softmax: [commissive_prob, directive_prob, inform_prob, question_prob]
 ```
 
-No new dependencies needed. The `candle-core`, `candle-nn`, `candle-transformers`, and `tokenizers` crates are already in `Cargo.toml`.
-
 ## Repository Structure
 
 ```
-phonolitui-sentence-classifier/
+dialogue-act-classifier/
 ├── README.md                 # This file
 ├── RESEARCH.md               # Full model comparison research
-├── DATASETS.md               # Dataset documentation
 ├── TRAINING_PLAN.md          # Detailed training methodology
-├── train.py                  # Fine-tuning script
+├── train.py                  # English fine-tuning script
+├── train_multilingual.py     # Multilingual fine-tuning script (EN+DE+RU)
 ├── evaluate.py               # Evaluation + edge-case test suite
 ├── export.py                 # Export to pytorch_model.bin + ONNX
 ├── augment.py                # ASR edge-case data augmentation
-├── config.yaml               # Training hyperparameters
+├── config.yaml               # English training hyperparameters
+├── config_multilingual.yaml  # Multilingual training hyperparameters
 ├── requirements.txt          # Python dependencies
 ├── tests/
-│   ├── test_cases.json       # Edge-case test suite (ASR + conversational)
-│   └── expected_outputs.json # Ground truth for test cases
+│   └── test_cases.json       # Edge-case test suite (ASR + conversational)
 └── models/                   # Output directory for trained models
-    ├── en/                   # English model
-    │   ├── pytorch_model.bin
-    │   ├── tokenizer.json
-    │   └── config.json
-    └── multilingual/         # Multilingual model (Phase 2)
+    ├── en/                   # English model (distilbert-base-uncased)
+    └── multilingual/         # Multilingual model (distilbert-base-multilingual-cased)
 ```
 
 ## Datasets
@@ -127,15 +110,14 @@ phonolitui-sentence-classifier/
 | Dataset | HF Path | Languages | Size | Classes | License |
 |---------|---------|-----------|------|---------|---------|
 | DailyDialog Acts | `eusip/silicone` config `dyda_da` | EN | ~100K utt | 4 (inform, question, directive, commissive) | CC BY-NC-SA 4.0 |
-| SwDA | `eusip/silicone` config `swda` | EN | ~200K utt | 41 (collapsible to 5) | LDC |
-| MRDA | `eusip/silicone` config `mrda` | EN | ~108K utt | 5 | NIST |
-| MIAM | `Bingsu/MIAM` | EN/FR/DE/ES/IT | varies | varies | varies |
+| XDailyDialog | [GitHub](https://github.com/liuzeming01/XDailyDialog) | EN/DE/IT/ZH | ~83K per lang | 4 (same as DailyDialog) | Apache-2.0 |
+| xdailydialog-ru | [`WSHAPER/xdailydialog-ru`](https://huggingface.co/datasets/WSHAPER/xdailydialog-ru) | RU | ~99K utt | 4 (translated from XDailyDialog EN) | Apache-2.0 |
 
 ## Candle Compatibility
 
 | Architecture | candle-transformers 0.10.2 | Notes |
 |--------------|---------------------------|-------|
-| BERT | Supported | Already used in phonolitui |
+| BERT | Supported | Standard |
 | DistilBERT | Supported | Target architecture |
 | RoBERTa | Supported | Alternative base |
 | XLM-RoBERTa | Supported | For multilingual |
