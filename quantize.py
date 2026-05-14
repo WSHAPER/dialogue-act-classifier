@@ -1,0 +1,373 @@
+"""
+Post-training quantization for the DistilBERT dialogue-act classifier.
+
+Supports three modes:
+  - fp16:    FP16 conversion (best for GPU inference — 2x size reduction, real speedup)
+  - dynamic: weight-only INT8 quantization (works on CPU and GPU)
+  - static:  INT8 static quantization with calibration (CPU only, highest compression)
+
+Usage:
+    python quantize.py                                    # FP16 conversion (default)
+    python quantize.py --mode dynamic                     # INT8 dynamic quantization
+    python quantize.py --mode static                      # INT8 static quantization (CPU)
+    python quantize.py --model-path models/en/final
+"""
+
+import argparse
+import json
+import random
+import time
+from pathlib import Path
+
+import numpy as np
+import yaml
+
+LABEL_NAMES = ["commissive", "directive", "inform", "question"]
+
+
+def load_config(path: str = "config.yaml") -> dict:
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+
+
+
+def export_fp32_onnx(model_path: str, output_dir: str):
+    from optimum.onnxruntime import ORTModelForSequenceClassification
+    from transformers import AutoTokenizer
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    print("Exporting FP32 ONNX model...")
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    model = ORTModelForSequenceClassification.from_pretrained(model_path, export=True)
+    model.save_pretrained(str(out))
+    tokenizer.save_pretrained(str(out))
+
+    onnx_file = out / "model.onnx"
+    if onnx_file.exists():
+        print(f"  Saved model.onnx ({onnx_file.stat().st_size / 1e6:.1f} MB)")
+    else:
+        onnx_files = list(out.glob("*.onnx"))
+        for f in onnx_files:
+            print(f"  Saved {f.name} ({f.stat().st_size / 1e6:.1f} MB)")
+
+    return out
+
+
+def _calibrationDataReader(tokenizer, max_length, num_samples, seed):
+    from datasets import load_dataset as hf_load_dataset
+
+    ds = hf_load_dataset("eusip/silicone", "dyda_da", split="train", trust_remote_code=True)
+    random.seed(seed)
+    indices = random.sample(range(len(ds)), min(num_samples, len(ds)))
+    subset = ds.select(indices)
+    texts = [ex["Utterance"] for ex in subset]
+
+    encoded = tokenizer(
+        texts,
+        padding="max_length",
+        truncation=True,
+        max_length=max_length,
+        return_tensors="np",
+    )
+
+    class _Reader:
+        def __init__(self, input_ids, attention_mask):
+            self.input_ids = input_ids
+            self.attention_mask = attention_mask
+            self.index = 0
+
+        def get_next(self):
+            if self.index >= self.input_ids.shape[0]:
+                return None
+            feed = {
+                "input_ids": self.input_ids[self.index : self.index + 1],
+                "attention_mask": self.attention_mask[self.index : self.index + 1],
+            }
+            self.index += 1
+            return feed
+
+        def rewind(self):
+            self.index = 0
+
+    return _Reader(encoded["input_ids"], encoded["attention_mask"])
+
+
+def quantize_model(
+    model_path: str,
+    output_dir: str,
+    mode: str,
+    calibration_samples: int,
+    seed: int,
+):
+    from onnxruntime.quantization import quantize_dynamic, QuantType
+    from transformers import AutoTokenizer
+
+    cfg = load_config()
+    max_length = cfg["max_seq_length"]
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+    fp32_dir = Path(output_dir) / "fp32"
+    onnx_file = fp32_dir / "model.onnx"
+    if not onnx_file.exists():
+        candidates = list(fp32_dir.glob("*.onnx")) if fp32_dir.exists() else []
+        if candidates:
+            onnx_file = candidates[0]
+        else:
+            fp32_path = export_fp32_onnx(model_path, str(fp32_dir))
+            onnx_file = fp32_path / "model.onnx"
+            if not onnx_file.exists():
+                candidates = list(fp32_path.glob("*.onnx"))
+                onnx_file = candidates[0] if candidates else None
+    else:
+        fp32_path = fp32_dir
+        print(f"Reusing existing FP32 ONNX: {onnx_file}")
+
+    if not onnx_file or not onnx_file.exists():
+        raise FileNotFoundError(f"No ONNX file found in {fp32_dir}")
+
+    quant_dir_name = {"static": "int8_static", "dynamic": "int8_dynamic", "fp16": "fp16"}[mode]
+    quant_dir = Path(output_dir) / quant_dir_name
+    quant_dir.mkdir(parents=True, exist_ok=True)
+    quantized_path = quant_dir / "model.onnx"
+
+    if mode == "fp16":
+        from onnxruntime.transformers.float16 import convert_float_to_float16
+        import onnx
+
+        print("Converting FP32 ONNX to FP16...")
+        model = onnx.load(str(onnx_file))
+        model_fp16 = convert_float_to_float16(model, keep_io_types=True)
+        onnx.save(model_fp16, str(quantized_path))
+    elif mode == "static":
+        from onnxruntime.quantization import quantize_static, QuantFormat
+        from onnxruntime.quantization.shape_inference import quant_pre_process
+
+        preprocessed = fp32_dir / "model_preprocessed.onnx"
+        if not preprocessed.exists():
+            print("Pre-processing ONNX model...")
+            import onnx as _onnx
+            model = _onnx.load(str(onnx_file))
+            model = _onnx.shape_inference.infer_shapes(model)
+            preprocessed_tmp = fp32_dir / "model_inferred.onnx"
+            _onnx.save(model, str(preprocessed_tmp))
+            try:
+                quant_pre_process(str(preprocessed_tmp), str(preprocessed), auto_merge=True)
+            except Exception:
+                import shutil
+                shutil.copy2(str(preprocessed_tmp), str(preprocessed))
+            print(f"  Saved preprocessed model ({preprocessed.stat().st_size / 1e6:.1f} MB)")
+        else:
+            print(f"Reusing preprocessed model: {preprocessed}")
+
+        print(f"\nCalibrating on {calibration_samples} samples...")
+        calib_reader = _calibrationDataReader(tokenizer, max_length, calibration_samples, seed)
+
+        print("Applying static INT8 quantization (CPU-targeted)...")
+        quantize_static(
+            str(preprocessed),
+            str(quantized_path),
+            calib_reader,
+            quant_format=QuantFormat.QDQ,
+            weight_type=QuantType.QInt8,
+            per_channel=True,
+        )
+    elif mode == "dynamic":
+        from onnxruntime.quantization import quantize_dynamic, QuantType
+
+        print("Applying dynamic INT8 quantization (weight-only)...")
+
+        import onnx
+        model = onnx.load(str(onnx_file))
+        layernorm_nodes = set()
+        for node in model.graph.node:
+            if "LayerNorm" in node.op_type:
+                layernorm_nodes.update(node.output)
+        nodes_to_exclude = list(layernorm_nodes)
+        print(f"  Excluding {len(nodes_to_exclude)} LayerNorm nodes")
+
+        quantize_dynamic(
+            str(onnx_file),
+            str(quantized_path),
+            weight_type=QuantType.QInt8,
+            per_channel=True,
+            use_external_data_format=False,
+            extra_options={"MatMatConstBOnly": True},
+        )
+
+    tokenizer.save_pretrained(str(quant_dir))
+
+    label_map_path = Path(model_path) / "label_map.json"
+    if label_map_path.exists():
+        import shutil
+        shutil.copy2(label_map_path, quant_dir / "label_map.json")
+
+    quantized_onnx = list(quant_dir.glob("*.onnx"))
+    for f in quantized_onnx:
+        print(f"  Saved {f.name} ({f.stat().st_size / 1e6:.1f} MB)")
+
+    print(f"\nQuantized model saved to {quant_dir}")
+    return fp32_path, quant_dir
+
+
+def benchmark_models(fp32_dir: Path, quant_dir: Path, use_gpu: bool = True):
+    import onnxruntime as ort
+    from datasets import load_dataset
+    from transformers import AutoTokenizer
+    from sklearn.metrics import accuracy_score, f1_score, classification_report
+
+    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if use_gpu else ["CPUExecutionProvider"]
+
+    tokenizer = AutoTokenizer.from_pretrained(str(fp32_dir))
+
+    print("\nLoading DailyDialog test set for benchmarking...")
+    ds = load_dataset("eusip/silicone", "dyda_da", split="test", trust_remote_code=True)
+    texts = ds["Utterance"]
+    labels = ds["Label"]
+
+    results = {}
+    LATENCY_SUBSAMPLE = 200
+
+    quant_label = quant_dir.name.upper()
+    for label, model_dir in [("FP32", fp32_dir), (quant_label, quant_dir)]:
+        onnx_file = model_dir / "model.onnx"
+        if not onnx_file.exists():
+            candidates = list(model_dir.glob("*.onnx"))
+            onnx_file = candidates[0] if candidates else None
+        if not onnx_file:
+            print(f"  Skipping {label}: no ONNX file found")
+            continue
+
+        print(f"\nBenchmarking {label}: {onnx_file.name}")
+        session = ort.InferenceSession(str(onnx_file), providers=providers)
+        active_provider = session.get_providers()[0]
+        print(f"  Execution provider: {active_provider}")
+
+        all_preds = []
+        batch_latencies = []
+
+        for i in range(0, len(texts), 64):
+            batch = texts[i : i + 64]
+            inputs = tokenizer(
+                batch,
+                padding=True,
+                truncation=True,
+                max_length=128,
+                return_tensors="np",
+            )
+            input_feed = {
+                "input_ids": inputs["input_ids"].astype(np.int64),
+                "attention_mask": inputs["attention_mask"].astype(np.int64),
+            }
+
+            start = time.perf_counter()
+            outputs = session.run(None, input_feed)
+            elapsed = time.perf_counter() - start
+
+            logits = outputs[0]
+            preds = np.argmax(logits, axis=-1)
+            all_preds.extend(preds.tolist())
+            batch_latencies.append(elapsed)
+
+        total_time = sum(batch_latencies)
+        per_sample_ms = total_time / len(texts) * 1000
+
+        per_item_latencies = []
+        for i in range(min(LATENCY_SUBSAMPLE, len(texts))):
+            inp = tokenizer(texts[i], padding="max_length", truncation=True, max_length=128, return_tensors="np")
+            feed = {
+                "input_ids": inp["input_ids"].astype(np.int64),
+                "attention_mask": inp["attention_mask"].astype(np.int64),
+            }
+            start = time.perf_counter()
+            session.run(None, feed)
+            elapsed = time.perf_counter() - start
+            per_item_latencies.append(elapsed * 1000)
+
+        sorted_lat = sorted(per_item_latencies)
+        n = len(sorted_lat)
+        p50 = sorted_lat[int(n * 0.50)]
+        p95 = sorted_lat[int(n * 0.95)]
+        p99 = sorted_lat[int(n * 0.99)]
+
+        acc = accuracy_score(labels, all_preds)
+        f1 = f1_score(labels, all_preds, average="macro")
+
+        print(f"  Accuracy: {acc:.4f}")
+        print(f"  F1-macro: {f1:.4f}")
+        print(f"  Batch latency: {total_time:.2f}s total, {per_sample_ms:.3f}ms/sample")
+        print(f"  Single-sample latency ({n} samples): p50={p50:.3f}ms, p95={p95:.3f}ms, p99={p99:.3f}ms")
+        print(f"\n  Classification Report:")
+        print(classification_report(labels, all_preds, target_names=LABEL_NAMES, digits=4))
+
+        results[label] = {
+            "accuracy": float(acc),
+            "f1_macro": float(f1),
+            "total_seconds": float(total_time),
+            "per_sample_ms": float(per_sample_ms),
+            "p50_ms": float(p50),
+            "p95_ms": float(p95),
+            "p99_ms": float(p99),
+            "provider": active_provider,
+        }
+
+    if "FP32" in results and quant_label in results:
+        fp32_f1 = results["FP32"]["f1_macro"]
+        quant_f1 = results[quant_label]["f1_macro"]
+        f1_delta = quant_f1 - fp32_f1
+        speedup = results["FP32"]["p50_ms"] / results[quant_label]["p50_ms"] if results[quant_label]["p50_ms"] > 0 else 0
+
+        print("\n" + "=" * 60)
+        print("COMPARISON")
+        print(f"  F1-macro: FP32={fp32_f1:.4f} → {quant_label}={quant_f1:.4f} (Δ={f1_delta:+.4f})")
+        print(f"  Latency:  FP32={results['FP32']['p50_ms']:.3f}ms → {quant_label}={results[quant_label]['p50_ms']:.3f}ms ({speedup:.2f}x)")
+        print(f"  Size:     FP32={_model_size_mb(fp32_dir):.1f}MB → {quant_label}={_model_size_mb(quant_dir):.1f}MB")
+        print("=" * 60)
+
+        if abs(f1_delta) > 0.02:
+            print("\n⚠  F1 degradation exceeds 2% threshold.")
+
+    return results
+
+
+def _model_size_mb(directory: Path) -> float:
+    total = sum(f.stat().st_size for f in directory.glob("*.onnx"))
+    return total / 1e6
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Quantization for dialogue-act classifier")
+    parser.add_argument("--model-path", default="models/en/final")
+    parser.add_argument("--output-dir", default=None, help="Defaults to model-path/quantized")
+    parser.add_argument("--mode", choices=["fp16", "dynamic", "static"], default="fp16", help="Quantization mode (default: fp16)")
+    parser.add_argument("--calibration-samples", type=int, default=500, help="Samples for static calibration")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--skip-benchmark", action="store_true")
+    parser.add_argument("--cpu-only", action="store_true", help="Benchmark on CPU only")
+    args = parser.parse_args()
+
+    output_dir = args.output_dir or str(Path(args.model_path) / "quantized")
+
+    fp32_dir, quant_dir = quantize_model(
+        model_path=args.model_path,
+        output_dir=output_dir,
+        mode=args.mode,
+        calibration_samples=args.calibration_samples,
+        seed=args.seed,
+    )
+
+    if not args.skip_benchmark:
+        results = benchmark_models(fp32_dir, quant_dir, use_gpu=not args.cpu_only)
+        results_path = Path(output_dir) / "benchmark_results.json"
+        with open(results_path, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"\nBenchmark results saved to {results_path}")
+
+    print("\nDone.")
+
+
+if __name__ == "__main__":
+    main()

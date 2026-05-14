@@ -254,6 +254,118 @@ def plot_confusion_matrix(cm, labels, output_path: str):
     print(f"Confusion matrix saved to {output_path}")
 
 
+def benchmark_quantized_model(quantized_path: str, test_cases_path: str = "tests/test_cases.json"):
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        print("onnxruntime not installed, skipping quantized model benchmark")
+        return None
+
+    print("\n" + "=" * 60)
+    print("Benchmarking Quantized ONNX Model")
+    print("=" * 60)
+
+    quant_dir = Path(quantized_path)
+    onnx_file = quant_dir / "model.onnx"
+    if not onnx_file.exists():
+        candidates = list(quant_dir.glob("*.onnx"))
+        if candidates:
+            onnx_file = candidates[0]
+        else:
+            print(f"No ONNX file found in {quantized_path}")
+            return None
+
+    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    session = ort.InferenceSession(str(onnx_file), providers=providers)
+    active_provider = session.get_providers()[0]
+    print(f"Model: {onnx_file.name} ({onnx_file.stat().st_size / 1e6:.1f} MB)")
+    print(f"Execution provider: {active_provider}")
+
+    from transformers import AutoTokenizer
+    from datasets import load_dataset
+    from sklearn.metrics import classification_report
+
+    tokenizer_path = quant_dir.parent / "fp32"
+    if not (tokenizer_path / "tokenizer.json").exists():
+        tokenizer_path = quant_dir
+    tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path))
+
+    ds = load_dataset("eusip/silicone", "dyda_da", split="test", trust_remote_code=True)
+    texts = ds["Utterance"]
+    labels = ds["Label"]
+
+    all_preds = []
+    per_item_latencies = []
+
+    for i, text in enumerate(texts):
+        inp = tokenizer(text, padding="max_length", truncation=True, max_length=128, return_tensors="np")
+        feed = {
+            "input_ids": inp["input_ids"].astype(np.int64),
+            "attention_mask": inp["attention_mask"].astype(np.int64),
+        }
+        start = time.perf_counter()
+        outputs = session.run(None, feed)
+        elapsed = time.perf_counter() - start
+        per_item_latencies.append(elapsed * 1000)
+
+        pred = int(np.argmax(outputs[0], axis=-1)[0])
+        all_preds.append(pred)
+
+    sorted_lat = sorted(per_item_latencies)
+    n = len(sorted_lat)
+    p50 = sorted_lat[int(n * 0.50)]
+    p95 = sorted_lat[int(n * 0.95)]
+    p99 = sorted_lat[int(n * 0.99)]
+    total_ms = sum(per_item_latencies)
+    avg_ms = total_ms / len(texts)
+
+    acc = accuracy_score(labels, all_preds)
+    f1 = f1_score(labels, all_preds, average="macro")
+
+    print(f"\nDailyDialog Test Set:")
+    print(f"  Accuracy: {acc:.4f}")
+    print(f"  F1-macro: {f1:.4f}")
+    print(f"  Latency: avg={avg_ms:.3f}ms, p50={p50:.3f}ms, p95={p95:.3f}ms, p99={p99:.3f}ms")
+    print(f"\nClassification Report:")
+    print(classification_report(labels, all_preds, target_names=LABEL_NAMES, digits=4))
+
+    with open(test_cases_path) as f:
+        test_cases = json.load(f)
+
+    label_map = {"commissive": 0, "directive": 1, "inform": 2, "question": 3}
+    ec_texts = [tc["text"] for tc in test_cases]
+    ec_expected = [label_map[tc["expected"]] for tc in test_cases]
+
+    ec_preds = []
+    for text in ec_texts:
+        inp = tokenizer(text, padding="max_length", truncation=True, max_length=128, return_tensors="np")
+        feed = {
+            "input_ids": inp["input_ids"].astype(np.int64),
+            "attention_mask": inp["attention_mask"].astype(np.int64),
+        }
+        outputs = session.run(None, feed)
+        ec_preds.append(int(np.argmax(outputs[0], axis=-1)[0]))
+
+    ec_correct = sum(1 for e, p in zip(ec_expected, ec_preds) if e == p)
+    ec_acc = ec_correct / len(ec_expected)
+    print(f"\nEdge-case accuracy: {ec_correct}/{len(ec_expected)} ({ec_acc:.1%})")
+
+    return {
+        "dailydialog": {
+            "accuracy": float(acc),
+            "f1_macro": float(f1),
+            "avg_ms": float(avg_ms),
+            "p50_ms": float(p50),
+            "p95_ms": float(p95),
+            "p99_ms": float(p99),
+            "provider": active_provider,
+        },
+        "edge_cases": {
+            "accuracy": float(ec_acc),
+        },
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate sentence classifier")
     parser.add_argument("--model-path", default="models/en/final")
@@ -261,6 +373,7 @@ def main():
     parser.add_argument("--skip-baseline", action="store_true")
     parser.add_argument("--skip-dailydialog", action="store_true")
     parser.add_argument("--output-dir", default="eval_results")
+    parser.add_argument("--quantized-model", default=None, help="Path to quantized ONNX model dir for benchmarking")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -295,6 +408,25 @@ def main():
                 print(f"  TigreGotico baseline:  {base_acc:.1%}")
                 improvement = our_acc - base_acc
                 print(f"  Improvement:           {improvement:+.1%}")
+                print("=" * 60)
+
+    if args.quantized_model:
+        quant_results = benchmark_quantized_model(args.quantized_model, args.test_cases)
+        if quant_results:
+            results["quantized_onnx"] = quant_results
+
+            if "dailydialog" in results and "dailydialog" in quant_results:
+                fp32_f1 = results["dailydialog"]["f1_macro"]
+                int8_f1 = quant_results["dailydialog"]["f1_macro"]
+                f1_delta = int8_f1 - fp32_f1
+                fp32_ms = results["dailydialog"]["avg_ms"]
+                int8_ms = quant_results["dailydialog"]["avg_ms"]
+                speedup = fp32_ms / int8_ms if int8_ms > 0 else 0
+
+                print("\n" + "=" * 60)
+                print("FP32 vs INT8 COMPARISON (DailyDialog test set)")
+                print(f"  F1-macro:  FP32={fp32_f1:.4f} → INT8={int8_f1:.4f} (Δ={f1_delta:+.4f})")
+                print(f"  Latency:   FP32={fp32_ms:.3f}ms → INT8={int8_ms:.3f}ms ({speedup:.2f}x)")
                 print("=" * 60)
 
     with open(output_dir / "evaluation_results.json", "w") as f:

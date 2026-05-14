@@ -184,6 +184,19 @@ def _export_onnx_manual(model_path: str, out: Path):
     print(f"  Saved model.onnx ({onnx_path.stat().st_size / 1e6:.1f} MB)")
 
 
+def _run_quantization(model_path: str, output_dir: str, mode: str, calibration_samples: int, seed: int):
+    from quantize import quantize_model
+
+    quant_output = output_dir or str(Path(model_path) / "quantized")
+    quantize_model(
+        model_path=model_path,
+        output_dir=quant_output,
+        mode=mode,
+        calibration_samples=calibration_samples,
+        seed=seed,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Export sentence classifier for Rust inference")
     parser.add_argument("--model-path", default="models/en/final")
@@ -191,6 +204,10 @@ def main():
     parser.add_argument("--onnx", action="store_true", help="Also export ONNX model")
     parser.add_argument("--onnx-only", action="store_true", help="Only export ONNX model")
     parser.add_argument("--safetensors", action="store_true", help="Use safetensors format")
+    parser.add_argument("--quantize", action="store_true", help="Also run quantization on exported ONNX")
+    parser.add_argument("--quantize-mode", choices=["fp16", "dynamic", "static"], default="fp16", help="Quantization mode (default: fp16)")
+    parser.add_argument("--quantize-samples", type=int, default=500, help="Calibration samples for static quantization (default: 500)")
+    parser.add_argument("--quantize-seed", type=int, default=42, help="Seed for calibration sampling")
     args = parser.parse_args()
 
     model_path = args.model_path
@@ -202,6 +219,16 @@ def main():
     if args.onnx or args.onnx_only:
         onnx_output = args.output_dir or str(Path(model_path) / "onnx-export")
         export_onnx(model_path, onnx_output)
+
+    if args.quantize:
+        print(f"\nRunning {args.quantize_mode} quantization...")
+        _run_quantization(
+            model_path=model_path,
+            output_dir=args.output_dir,
+            mode=args.quantize_mode,
+            calibration_samples=args.quantize_samples,
+            seed=args.quantize_seed,
+        )
 
 
 if __name__ == "__main__":
