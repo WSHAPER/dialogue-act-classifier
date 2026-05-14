@@ -29,10 +29,10 @@ xdailydialog:
       dev: it_dev_human.txt
       test: it_test_human.txt
   act_label_map:
-    1: 0
-    2: 1
-    3: 2
-    4: 3
+    1: 2
+    2: 3
+    3: 1
+    4: 0
 russian:
   source: translate
   model: Helsinki-NLP/opus-mt-en-ru

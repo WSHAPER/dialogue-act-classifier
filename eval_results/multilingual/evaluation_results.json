@@ -1,0 +1,78 @@
+{
+  "edge_cases": {
+    "accuracy": 0.7777777777777778,
+    "failures": [
+      {
+        "text": "Can you hear me?",
+        "expected": "question",
+        "predicted": "directive",
+        "confidence": 0.5587,
+        "category": "polar_question"
+      },
+      {
+        "text": "Can you see my screen?",
+        "expected": "question",
+        "predicted": "directive",
+        "confidence": 0.9807,
+        "category": "polar_question"
+      },
+      {
+        "text": "Stop the server.",
+        "expected": "directive",
+        "predicted": "inform",
+        "confidence": 0.65,
+        "category": "command"
+      },
+      {
+        "text": "Ensure that the tests pass.",
+        "expected": "directive",
+        "predicted": "inform",
+        "confidence": 0.8555,
+        "category": "request"
+      },
+      {
+        "text": "That's definitely not a question.",
+        "expected": "inform",
+        "predicted": "commissive",
+        "confidence": 0.5999,
+        "category": "inform"
+      },
+      {
+        "text": "I'll handle the deployment.",
+        "expected": "commissive",
+        "predicted": "directive",
+        "confidence": 0.7192,
+        "category": "commissive"
+      },
+      {
+        "text": "I promise to finish by Friday.",
+        "expected": "commissive",
+        "predicted": "directive",
+        "confidence": 0.6915,
+        "category": "commissive"
+      },
+      {
+        "text": "We will deliver the results tomorrow.",
+        "expected": "commissive",
+        "predicted": "inform",
+        "confidence": 0.8273,
+        "category": "commissive"
+      },
+      {
+        "text": "Let me look into it and get back to you.",
+        "expected": "commissive",
+        "predicted": "directive",
+        "confidence": 0.5054,
+        "category": "commissive"
+      },
+      {
+        "text": "um can you explain that again",
+        "expected": "question",
+        "predicted": "directive",
+        "confidence": 0.7177,
+        "category": "asr_disfluent"
+      }
+    ],
+    "avg_ms": 2.896489266600434
+  }
+}
