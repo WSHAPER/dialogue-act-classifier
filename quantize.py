@@ -719,6 +719,118 @@ def benchmark_tensorrt_iobinding(quant_dir: Path, use_gpu: bool = True):
     return result
 
 
+def benchmark_batch(quant_dir: Path, use_gpu: bool = True):
+    """Benchmark batch inference with dynamic padding across multiple batch sizes.
+    Measures throughput (samples/sec) and per-sample latency for serving workloads."""
+    import onnxruntime as ort
+    from datasets import load_dataset
+    from transformers import AutoTokenizer
+    from sklearn.metrics import accuracy_score, f1_score
+
+    if not use_gpu:
+        print("Batch benchmark requires GPU — skipping")
+        return None
+
+    onnx_file = quant_dir / "model.onnx"
+    if not onnx_file.exists():
+        onnx_file = list(quant_dir.glob("*.onnx"))[0]
+
+    max_length = _load_inference_max_length()
+
+    print(f"\n{'=' * 60}")
+    print(f"Batch Inference Benchmark (dynamic padding, max_length={max_length})")
+    print(f"{'=' * 60}")
+
+    sess_opts = ort.SessionOptions()
+    sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    sess_opts.enable_mem_pattern = True
+    sess_opts.enable_mem_reuse = True
+    sess_opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+
+    trt_cache = str(quant_dir / "trt_cache")
+    providers = [(
+        "TensorrtExecutionProvider",
+        {
+            "device_id": 0,
+            "trt_max_workspace_size": 2 << 30,
+            "trt_fp16_enable": True,
+            "trt_engine_cache_enable": True,
+            "trt_engine_cache_path": trt_cache,
+        },
+    )]
+
+    try:
+        session = ort.InferenceSession(str(onnx_file), sess_options=sess_opts, providers=providers)
+    except Exception as e:
+        print(f"  Failed to create session: {e}")
+        return None
+
+    active_provider = session.get_providers()[0]
+    print(f"  Provider: {active_provider}")
+
+    tokenizer = AutoTokenizer.from_pretrained(str(quant_dir))
+    ds = load_dataset("eusip/silicone", "dyda_da", split="test", trust_remote_code=True)
+    texts = ds["Utterance"]
+    labels = ds["Label"]
+
+    batch_sizes = [1, 4, 8, 16, 32, 64]
+    all_preds_accum = {}
+    results = {}
+
+    for bs in batch_sizes:
+        all_preds = []
+        batch_latencies = []
+
+        for i in range(0, len(texts), bs):
+            batch = texts[i : i + bs]
+            inputs = tokenizer(
+                batch,
+                padding=True,
+                truncation=True,
+                max_length=max_length,
+                return_tensors="np",
+            )
+            feed = {
+                "input_ids": inputs["input_ids"].astype(np.int64),
+                "attention_mask": inputs["attention_mask"].astype(np.int64),
+            }
+
+            t0 = time.perf_counter()
+            outputs = session.run(None, feed)
+            elapsed = time.perf_counter() - t0
+
+            preds = np.argmax(outputs[0], axis=-1)
+            all_preds.extend(preds.tolist())
+            batch_latencies.append((elapsed, len(batch)))
+
+        total_time = sum(t for t, _ in batch_latencies)
+        total_samples = sum(n for _, n in batch_latencies)
+        throughput = total_samples / total_time
+        per_sample_ms = total_time / total_samples * 1000
+
+        acc = accuracy_score(labels, all_preds)
+        f1 = f1_score(labels, all_preds, average="macro")
+        all_preds_accum[bs] = all_preds
+
+        results[bs] = {
+            "throughput_sps": round(throughput, 1),
+            "per_sample_ms": round(per_sample_ms, 3),
+            "total_seconds": round(total_time, 3),
+            "accuracy": round(float(acc), 4),
+            "f1_macro": round(float(f1), 4),
+        }
+        print(f"  bs={bs:>3d}: {throughput:>8.1f} samples/s, {per_sample_ms:.3f}ms/sample, "
+              f"total={total_time:.2f}s, acc={acc:.4f}, f1={f1:.4f}")
+
+    best_bs = max(results, key=lambda k: results[k]["throughput_sps"])
+    print(f"\n  Best throughput: bs={best_bs} ({results[best_bs]['throughput_sps']:.1f} samples/s)")
+    print(f"  Best latency:    bs={min(results, key=lambda k: results[k]['per_sample_ms'])} "
+          f"({min(r['per_sample_ms'] for r in results.values()):.3f}ms/sample)")
+    print(f"{'=' * 60}")
+
+    return {"provider": active_provider, "batch_results": results, "best_batch_size": best_bs}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Quantization for dialogue-act classifier")
     parser.add_argument("--model-path", default="models/en/final")
@@ -731,6 +843,7 @@ def main():
     parser.add_argument("--iobinding", action="store_true", help="Also benchmark with IOBinding (GPU-resident tensors)")
     parser.add_argument("--tensorrt", action="store_true", help="Also benchmark with TensorRT EP")
     parser.add_argument("--trt-iobinding", action="store_true", help="Benchmark TensorRT + IOBinding")
+    parser.add_argument("--batch", action="store_true", help="Benchmark batch inference with dynamic padding")
     args = parser.parse_args()
 
     output_dir = args.output_dir or str(Path(args.model_path) / "quantized")
@@ -773,6 +886,14 @@ def main():
             with open(trtio_path, "w") as f:
                 json.dump(trtio_results, f, indent=2)
             print(f"TRT+IOBinding results saved to {trtio_path}")
+
+    if args.batch:
+        batch_results = benchmark_batch(quant_dir, use_gpu=not args.cpu_only)
+        if batch_results:
+            batch_path = Path(output_dir) / "batch_results.json"
+            with open(batch_path, "w") as f:
+                json.dump(batch_results, f, indent=2)
+            print(f"Batch results saved to {batch_path}")
 
     print("\nDone.")
 
