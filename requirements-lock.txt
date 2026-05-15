@@ -66,6 +66,10 @@ scipy==1.17.1
 seaborn==0.13.2
 six==1.17.0
 sympy==1.14.0
+tensorrt==10.16.1.11
+tensorrt_cu13==10.16.1.11
+tensorrt_cu13_bindings==10.16.1.11
+tensorrt_cu13_libs==10.16.1.11
 threadpoolctl==3.6.0
 tokenizers==0.22.2
 torch==2.12.0
