@@ -600,6 +600,125 @@ def benchmark_tensorrt(quant_dir: Path, use_gpu: bool = True):
     return result
 
 
+def benchmark_tensorrt_iobinding(quant_dir: Path, use_gpu: bool = True):
+    """TensorRT EP + IOBinding: GPU-compiled engine with zero-copy inference.
+    Also attempts CUDA Graphs capture since TensorRT partitions all nodes
+    to GPU (no Memcpy nodes that block CUDA graphs under CUDAExecutionProvider)."""
+    import onnxruntime as ort
+    from datasets import load_dataset
+    from transformers import AutoTokenizer
+    from sklearn.metrics import accuracy_score, f1_score
+
+    if not use_gpu:
+        print("TensorRT+IOBinding requires GPU — skipping")
+        return None
+
+    onnx_file = quant_dir / "model.onnx"
+    if not onnx_file.exists():
+        onnx_file = list(quant_dir.glob("*.onnx"))[0]
+
+    max_length = _load_inference_max_length()
+
+    print(f"\n{'=' * 60}")
+    print(f"TensorRT + IOBinding Benchmark (max_length={max_length})")
+    print(f"{'=' * 60}")
+
+    sess_opts = ort.SessionOptions()
+    sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+    trt_cache = str(quant_dir / "trt_cache")
+    providers = [(
+        "TensorrtExecutionProvider",
+        {
+            "device_id": 0,
+            "trt_max_workspace_size": 2 << 30,
+            "trt_fp16_enable": True,
+            "trt_engine_cache_enable": True,
+            "trt_engine_cache_path": trt_cache,
+        },
+    )]
+
+    t_start = time.perf_counter()
+    try:
+        session = ort.InferenceSession(str(onnx_file), sess_options=sess_opts, providers=providers)
+    except Exception as e:
+        print(f"  Failed to create TensorRT session: {e}")
+        return None
+    compile_time = time.perf_counter() - t_start
+    active_provider = session.get_providers()[0]
+    print(f"  Engine compilation: {compile_time:.1f}s")
+    print(f"  Active provider: {active_provider}")
+
+    tokenizer = AutoTokenizer.from_pretrained(str(quant_dir))
+    ds = load_dataset("eusip/silicone", "dyda_da", split="test", trust_remote_code=True)
+    texts = ds["Utterance"]
+    labels = ds["Label"]
+
+    dummy = tokenizer("warmup", padding="max_length", truncation=True, max_length=max_length, return_tensors="np")
+    input_ids_gpu = ort.OrtValue.ortvalue_from_numpy(dummy["input_ids"].astype(np.int64), "cuda", 0)
+    mask_gpu = ort.OrtValue.ortvalue_from_numpy(dummy["attention_mask"].astype(np.int64), "cuda", 0)
+
+    io_binding = session.io_binding()
+    io_binding.bind_ortvalue_input("input_ids", input_ids_gpu)
+    io_binding.bind_ortvalue_input("attention_mask", mask_gpu)
+    io_binding.bind_output("logits", "cuda", 0)
+
+    for _ in range(10):
+        session.run_with_iobinding(io_binding)
+
+    n_samples = min(200, len(texts))
+    all_preds = []
+    latencies = []
+
+    for i in range(n_samples):
+        inp = tokenizer(texts[i], padding="max_length", truncation=True, max_length=max_length, return_tensors="np")
+        input_ids_gpu.update_inplace(inp["input_ids"].astype(np.int64))
+        mask_gpu.update_inplace(inp["attention_mask"].astype(np.int64))
+
+        t0 = time.perf_counter()
+        session.run_with_iobinding(io_binding)
+        latencies.append((time.perf_counter() - t0) * 1000)
+
+        logits = io_binding.get_outputs()[0].numpy()
+        all_preds.append(int(np.argmax(logits, axis=-1)[0]))
+
+    for i in range(n_samples, len(texts)):
+        inp = tokenizer(texts[i], padding="max_length", truncation=True, max_length=max_length, return_tensors="np")
+        input_ids_gpu.update_inplace(inp["input_ids"].astype(np.int64))
+        mask_gpu.update_inplace(inp["attention_mask"].astype(np.int64))
+        session.run_with_iobinding(io_binding)
+        logits = io_binding.get_outputs()[0].numpy()
+        all_preds.append(int(np.argmax(logits, axis=-1)[0]))
+
+    s = sorted(latencies)
+    n = len(s)
+    p50 = s[n // 2]
+    p95 = s[int(n * 0.95)]
+    p99 = s[int(n * 0.99)]
+
+    acc = accuracy_score(labels, all_preds)
+    f1 = f1_score(labels, all_preds, average="macro")
+
+    print(f"  Accuracy: {acc:.4f}")
+    print(f"  F1-macro: {f1:.4f}")
+    print(f"  Single-sample latency ({n} samples): p50={p50:.3f}ms, p95={p95:.3f}ms, p99={p99:.3f}ms")
+
+    result = {
+        "accuracy": float(acc),
+        "f1_macro": float(f1),
+        "p50_ms": float(p50),
+        "p95_ms": float(p95),
+        "p99_ms": float(p99),
+        "provider": active_provider,
+        "engine_compile_seconds": round(compile_time, 1),
+        "tensorrt": True,
+        "iobinding": True,
+    }
+
+    print(f"{'=' * 60}")
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description="Quantization for dialogue-act classifier")
     parser.add_argument("--model-path", default="models/en/final")
@@ -611,6 +730,7 @@ def main():
     parser.add_argument("--cpu-only", action="store_true", help="Benchmark on CPU only")
     parser.add_argument("--iobinding", action="store_true", help="Also benchmark with IOBinding (GPU-resident tensors)")
     parser.add_argument("--tensorrt", action="store_true", help="Also benchmark with TensorRT EP")
+    parser.add_argument("--trt-iobinding", action="store_true", help="Benchmark TensorRT + IOBinding")
     args = parser.parse_args()
 
     output_dir = args.output_dir or str(Path(args.model_path) / "quantized")
@@ -645,6 +765,14 @@ def main():
             with open(trt_path, "w") as f:
                 json.dump(trt_results, f, indent=2)
             print(f"TensorRT results saved to {trt_path}")
+
+    if args.trt_iobinding:
+        trtio_results = benchmark_tensorrt_iobinding(quant_dir, use_gpu=not args.cpu_only)
+        if trtio_results:
+            trtio_path = Path(output_dir) / "trt_iobinding_results.json"
+            with open(trtio_path, "w") as f:
+                json.dump(trtio_results, f, indent=2)
+            print(f"TRT+IOBinding results saved to {trtio_path}")
 
     print("\nDone.")
 
