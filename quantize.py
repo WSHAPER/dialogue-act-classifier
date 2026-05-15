@@ -492,6 +492,114 @@ def benchmark_cuda_graphs(quant_dir: Path, use_gpu: bool = True):
     return result
 
 
+def benchmark_tensorrt(quant_dir: Path, use_gpu: bool = True):
+    """Benchmark with TensorRT execution provider: compiles ONNX graph into
+    a GPU-optimized engine with operator fusion, kernel auto-tuning, and
+    full CUDA partitioning (no Memcpy nodes)."""
+    import onnxruntime as ort
+    from datasets import load_dataset
+    from transformers import AutoTokenizer
+    from sklearn.metrics import accuracy_score, f1_score
+
+    if not use_gpu:
+        print("TensorRT EP requires GPU — skipping")
+        return None
+
+    onnx_file = quant_dir / "model.onnx"
+    if not onnx_file.exists():
+        onnx_file = list(quant_dir.glob("*.onnx"))[0]
+
+    max_length = _load_inference_max_length()
+
+    print(f"\n{'=' * 60}")
+    print(f"TensorRT EP Benchmark (max_length={max_length})")
+    print(f"{'=' * 60}")
+
+    sess_opts = ort.SessionOptions()
+    sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+    trt_cache = str(quant_dir / "trt_cache")
+    providers = [(
+        "TensorrtExecutionProvider",
+        {
+            "device_id": 0,
+            "trt_max_workspace_size": 2 << 30,
+            "trt_fp16_enable": True,
+            "trt_engine_cache_enable": True,
+            "trt_engine_cache_path": trt_cache,
+        },
+    )]
+
+    t_start = time.perf_counter()
+    try:
+        session = ort.InferenceSession(str(onnx_file), sess_options=sess_opts, providers=providers)
+    except Exception as e:
+        print(f"  Failed to create TensorRT session: {e}")
+        return None
+    compile_time = time.perf_counter() - t_start
+    print(f"  Engine compilation: {compile_time:.1f}s")
+
+    active_provider = session.get_providers()[0]
+    print(f"  Active provider: {active_provider}")
+
+    if "Tensorrt" not in active_provider:
+        print(f"  WARNING: TensorRT EP not active, falling back to {active_provider}")
+
+    tokenizer = AutoTokenizer.from_pretrained(str(quant_dir))
+    ds = load_dataset("eusip/silicone", "dyda_da", split="test", trust_remote_code=True)
+    texts = ds["Utterance"]
+    labels = ds["Label"]
+
+    for _ in range(10):
+        inp = tokenizer(texts[0], padding="max_length", truncation=True, max_length=max_length, return_tensors="np")
+        session.run(None, {"input_ids": inp["input_ids"].astype(np.int64), "attention_mask": inp["attention_mask"].astype(np.int64)})
+
+    n_samples = min(200, len(texts))
+    all_preds = []
+    latencies = []
+
+    for i in range(n_samples):
+        inp = tokenizer(texts[i], padding="max_length", truncation=True, max_length=max_length, return_tensors="np")
+        feed = {"input_ids": inp["input_ids"].astype(np.int64), "attention_mask": inp["attention_mask"].astype(np.int64)}
+        t0 = time.perf_counter()
+        outputs = session.run(None, feed)
+        latencies.append((time.perf_counter() - t0) * 1000)
+        all_preds.append(int(np.argmax(outputs[0], axis=-1)[0]))
+
+    for i in range(n_samples, len(texts)):
+        inp = tokenizer(texts[i], padding="max_length", truncation=True, max_length=max_length, return_tensors="np")
+        feed = {"input_ids": inp["input_ids"].astype(np.int64), "attention_mask": inp["attention_mask"].astype(np.int64)}
+        outputs = session.run(None, feed)
+        all_preds.append(int(np.argmax(outputs[0], axis=-1)[0]))
+
+    s = sorted(latencies)
+    n = len(s)
+    p50 = s[n // 2]
+    p95 = s[int(n * 0.95)]
+    p99 = s[int(n * 0.99)]
+
+    acc = accuracy_score(labels, all_preds)
+    f1 = f1_score(labels, all_preds, average="macro")
+
+    print(f"  Accuracy: {acc:.4f}")
+    print(f"  F1-macro: {f1:.4f}")
+    print(f"  Single-sample latency ({n} samples): p50={p50:.3f}ms, p95={p95:.3f}ms, p99={p99:.3f}ms")
+
+    result = {
+        "accuracy": float(acc),
+        "f1_macro": float(f1),
+        "p50_ms": float(p50),
+        "p95_ms": float(p95),
+        "p99_ms": float(p99),
+        "provider": active_provider,
+        "engine_compile_seconds": round(compile_time, 1),
+        "tensorrt": True,
+    }
+
+    print(f"{'=' * 60}")
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description="Quantization for dialogue-act classifier")
     parser.add_argument("--model-path", default="models/en/final")
@@ -502,6 +610,7 @@ def main():
     parser.add_argument("--skip-benchmark", action="store_true")
     parser.add_argument("--cpu-only", action="store_true", help="Benchmark on CPU only")
     parser.add_argument("--iobinding", action="store_true", help="Also benchmark with IOBinding (GPU-resident tensors)")
+    parser.add_argument("--tensorrt", action="store_true", help="Also benchmark with TensorRT EP")
     args = parser.parse_args()
 
     output_dir = args.output_dir or str(Path(args.model_path) / "quantized")
@@ -528,6 +637,14 @@ def main():
             with open(cg_path, "w") as f:
                 json.dump(cg_results, f, indent=2)
             print(f"IOBinding results saved to {cg_path}")
+
+    if args.tensorrt:
+        trt_results = benchmark_tensorrt(quant_dir, use_gpu=not args.cpu_only)
+        if trt_results:
+            trt_path = Path(output_dir) / "tensorrt_results.json"
+            with open(trt_path, "w") as f:
+                json.dump(trt_results, f, indent=2)
+            print(f"TensorRT results saved to {trt_path}")
 
     print("\nDone.")
 
